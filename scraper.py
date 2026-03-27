@@ -95,40 +95,45 @@ def is_bad_title(text: str) -> bool:
 def extract_items_from_lines(lines: list[str]) -> list[dict]:
     items = []
 
-    for i, line in enumerate(lines):
-        if not is_dday_line(line):
+    i = 0
+    while i < len(lines):
+        line = clean_text(lines[i])
+
+        # 제목 줄 패턴: *  1
+        title_match = re.search(r"【\d+†\s*(.+?)\s*】\s*\d*", line)
+        if not title_match:
+            i += 1
             continue
 
-        dday = clean_text(line)
-        title = ""
+        raw_title = clean_text(title_match.group(1))
+
+        # 앞에 분야명이 붙어 있을 수 있어서 너무 길면 그대로 두고 사용
+        title = raw_title
+
         host = "정보 없음"
         period = "정보 없음"
+        dday = "정보 없음"
 
-        # D-day 앞뒤 범위에서 정보 찾기
-        start = max(0, i - 6)
-        end = min(len(lines), i + 8)
-        window = lines[start:end]
+        # 다음 몇 줄 안에서 주최/접수/DDay 찾기
+        for j in range(i + 1, min(i + 8, len(lines))):
+            cur = clean_text(lines[j])
 
-        # 접수기간 찾기
-        for w in window:
-            if is_period_line(w):
-                period = extract_period(w)
-                break
+            if host == "정보 없음":
+                host_match = re.search(r"주최\s*\.\s*(.+)", cur)
+                if host_match:
+                    host = clean_text(host_match.group(1))
 
-        # 주최 찾기
-        for w in window:
-            if is_host_line(w):
-                host = extract_host(w)
-                break
+            if period == "정보 없음":
+                period_match = re.search(r"접수\s*(\d{2}\.\d{2}~\d{2}\.\d{2})", cur)
+                if period_match:
+                    period = period_match.group(1)
 
-        # 제목 찾기: D-day 바로 뒤쪽 우선, 없으면 앞쪽도 탐색
-        candidate_lines = lines[i + 1:min(len(lines), i + 7)] + lines[max(0, i - 6):i]
-        for w in candidate_lines:
-            if not is_bad_title(w):
-                title = clean_text(w)
-                break
+            if dday == "정보 없음":
+                dday_match = re.search(r"(D-\d+|D-Day)", cur)
+                if dday_match:
+                    dday = dday_match.group(1)
 
-        if title and period != "정보 없음":
+        if period != "정보 없음" and dday != "정보 없음":
             items.append({
                 "title": title,
                 "host": host,
@@ -136,6 +141,8 @@ def extract_items_from_lines(lines: list[str]) -> list[dict]:
                 "dday": dday,
                 "detail_url": ""
             })
+
+        i += 1
 
     # 중복 제거
     unique_items = []
@@ -237,7 +244,11 @@ def main():
 
     items = extract_items_from_lines(lines)
 
-    # 너무 많으면 앞부분만 사용
+    # 디버그 출력
+    print("추출 건수:", len(items))
+    for item in items[:5]:
+        print(item)
+
     items = items[:20]
 
     data = save_json(items)
