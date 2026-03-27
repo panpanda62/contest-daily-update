@@ -1,13 +1,12 @@
 import json
 import re
 from datetime import datetime
-from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://www.contestkorea.com"
-LIST_URL = "https://www.contestkorea.com/sub/list.php?int_gbn=1"
+URL = "https://www.thinkcontest.com/thinkgood/index.do"
 
 HEADERS = {
     "User-Agent": (
@@ -15,7 +14,7 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/146.0.0.0 Safari/537.36"
     ),
-    "Referer": "https://www.contestkorea.com/",
+    "Referer": "https://www.thinkcontest.com/",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
@@ -31,135 +30,48 @@ def get_html(url: str) -> str:
     return response.text
 
 
-def is_dday_line(text: str) -> bool:
-    text = clean_text(text)
-    return bool(re.fullmatch(r"D-\d+|D-Day", text))
-
-
-def is_period_line(text: str) -> bool:
-    text = clean_text(text)
-    return bool(re.search(r"접수\s*\d{2}\.\d{2}\s*[~\-]\s*\d{2}\.\d{2}", text))
-
-
-def extract_period(text: str) -> str:
-    text = clean_text(text)
-    match = re.search(r"접수\s*(\d{2}\.\d{2}\s*[~\-]\s*\d{2}\.\d{2})", text)
-    if match:
-        return match.group(1).replace(" ", "")
-    return "정보 없음"
-
-
-def is_host_line(text: str) -> bool:
-    text = clean_text(text)
-    return text.startswith("주최") or text.startswith("주관")
-
-
-def extract_host(text: str) -> str:
-    text = clean_text(text)
-    text = re.sub(r"^(주최|주관)\s*[.:·∙]?\s*", "", text)
-    return text if text else "정보 없음"
-
-
-def is_bad_title(text: str) -> bool:
-    text = clean_text(text)
-
-    if not text:
-        return True
-    if len(text) < 4:
-        return True
-    if text in {
-        "대상", "지역", "주최·주관", "총상금", "1등상금",
-        "전체", "누구나", "대학생", "일반인", "온라인"
-    }:
-        return True
-    if text.startswith("접수"):
-        return True
-    if text.startswith("주최") or text.startswith("주관"):
-        return True
-    if text.startswith("심사") or text.startswith("발표"):
-        return True
-    if text.startswith("조회"):
-        return True
-    if text.startswith("관심"):
-        return True
-    if text.startswith("스크랩"):
-        return True
-    if text.startswith("정부") or text.startswith("신문") or text.startswith("학교"):
-        return True
-    if re.fullmatch(r"D-\d+|D-Day", text):
-        return True
-
-    return False
-
-
-def extract_items_from_lines(lines: list[str]) -> list[dict]:
+def extract_best_titles(lines: list[str]) -> list[dict]:
     items = []
+    in_best_section = False
 
-    i = 0
-    while i < len(lines):
-        line = clean_text(lines[i])
+    for line in lines:
+        line = clean_text(line)
 
-        # 제목 줄 패턴: *  1
-        title_match = re.search(r"【\d+†\s*(.+?)\s*】\s*\d*", line)
-        if not title_match:
-            i += 1
+        # "주간 조회수 베스트" 구간 진입
+        if "주간 조회수 베스트" in line:
+            in_best_section = True
             continue
 
-        raw_title = clean_text(title_match.group(1))
+        if not in_best_section:
+            continue
 
-        # 앞에 분야명이 붙어 있을 수 있어서 너무 길면 그대로 두고 사용
-        title = raw_title
+        # 패턴: * 1. 2026 대한민국 헌혈 공모전
+        match = re.match(r"^\*\s*(\d+)\.\s*(.+)$", line)
+        if match:
+            rank = int(match.group(1))
+            title = clean_text(match.group(2))
 
-        host = "정보 없음"
-        period = "정보 없음"
-        dday = "정보 없음"
+            if 1 <= rank <= 10:
+                items.append({
+                    "rank": rank,
+                    "title": title,
+                    "source_url": URL
+                })
 
-        # 다음 몇 줄 안에서 주최/접수/DDay 찾기
-        for j in range(i + 1, min(i + 8, len(lines))):
-            cur = clean_text(lines[j])
+            # 10개까지만 수집
+            if len(items) >= 10:
+                break
 
-            if host == "정보 없음":
-                host_match = re.search(r"주최\s*\.\s*(.+)", cur)
-                if host_match:
-                    host = clean_text(host_match.group(1))
-
-            if period == "정보 없음":
-                period_match = re.search(r"접수\s*(\d{2}\.\d{2}~\d{2}\.\d{2})", cur)
-                if period_match:
-                    period = period_match.group(1)
-
-            if dday == "정보 없음":
-                dday_match = re.search(r"(D-\d+|D-Day)", cur)
-                if dday_match:
-                    dday = dday_match.group(1)
-
-        if period != "정보 없음" and dday != "정보 없음":
-            items.append({
-                "title": title,
-                "host": host,
-                "period": period,
-                "dday": dday,
-                "detail_url": ""
-            })
-
-        i += 1
-
-    # 중복 제거
-    unique_items = []
-    seen = set()
-    for item in items:
-        key = (item["title"], item["host"], item["period"], item["dday"])
-        if key not in seen:
-            seen.add(key)
-            unique_items.append(item)
-
-    return unique_items
+    return items
 
 
 def save_json(items: list[dict]) -> dict:
+    kst_now = datetime.now(ZoneInfo("Asia/Seoul"))
+
     data = {
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "source": "contestkorea",
+        "updated_at": kst_now.strftime("%Y-%m-%d %H:%M:%S"),
+        "timezone": "Asia/Seoul",
+        "source": "thinkcontest",
         "count": len(items),
         "items": items
     }
@@ -176,10 +88,8 @@ def save_html(data: dict):
     for item in data["items"]:
         row = f"""
         <div class="card">
-            <h2>{item['title']}</h2>
-            <p><strong>주최:</strong> {item['host']}</p>
-            <p><strong>접수기간:</strong> {item['period']}</p>
-            <p><strong>D-day:</strong> {item['dday']}</p>
+            <h2>{item['rank']}. {item['title']}</h2>
+            <p><a href="{item['source_url']}" target="_blank">씽굿 바로가기</a></p>
         </div>
         """
         rows.append(row)
@@ -216,14 +126,21 @@ def save_html(data: dict):
             margin-top: 0;
             font-size: 22px;
         }}
+        a {{
+            color: #1565c0;
+            text-decoration: none;
+        }}
+        a:hover {{
+            text-decoration: underline;
+        }}
     </style>
 </head>
 <body>
     <h1>공모전 Daily Update</h1>
     <div class="info">
-        <p>마지막 업데이트: {data["updated_at"]}</p>
+        <p>마지막 업데이트: {data["updated_at"]} ({data["timezone"]})</p>
         <p>수집 건수: {data["count"]}</p>
-        <p>출처: ContestKorea</p>
+        <p>출처: ThinkContest(씽굿)</p>
     </div>
     {''.join(rows)}
 </body>
@@ -235,21 +152,18 @@ def save_html(data: dict):
 
 
 def main():
-    print("ContestKorea 목록 수집 중...")
-    html = get_html(LIST_URL)
+    print("씽굿 홈페이지 수집 중...")
+    html = get_html(URL)
 
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text("\n", strip=True)
     lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
 
-    items = extract_items_from_lines(lines)
+    items = extract_best_titles(lines)
 
-    # 디버그 출력
     print("추출 건수:", len(items))
-    for item in items[:5]:
+    for item in items:
         print(item)
-
-    items = items[:20]
 
     data = save_json(items)
     save_html(data)
