@@ -1,178 +1,107 @@
 import json
 import re
-from datetime import datetime, date
+from datetime import datetime
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://www.wevity.com/"
-LIST_URL = "https://www.wevity.com/"
+BASE_URL = "https://www.contestkorea.com"
+LIST_URL = "https://www.contestkorea.com/sub/list.php?int_gbn=1"
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/146.0.0.0 Safari/537.36"
-    )
+    ),
+    "Referer": "https://www.contestkorea.com/",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
 }
-
-
-def get_soup(url: str) -> BeautifulSoup:
-    response = requests.get(url, headers=HEADERS, timeout=20)
-    response.raise_for_status()
-    response.encoding = response.apparent_encoding
-    return BeautifulSoup(response.text, "html.parser")
-
-
-def extract_detail_links() -> list[str]:
-    soup = get_soup(LIST_URL)
-    links = []
-
-    for a_tag in soup.find_all("a", href=True):
-        href = a_tag["href"]
-        if "c=find" in href and "gbn=view" in href:
-            full_url = urljoin(BASE_URL, href)
-            links.append(full_url)
-
-    unique_links = []
-    seen = set()
-
-    for link in links:
-        if link not in seen:
-            seen.add(link)
-            unique_links.append(link)
-
-    return unique_links
 
 
 def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def extract_title(soup: BeautifulSoup) -> str:
-    og_title = soup.find("meta", property="og:title")
-    if og_title and og_title.get("content"):
-        title = clean_text(og_title["content"])
-        if title:
-            return title
-
-    for tag in soup.find_all(["h1", "h2", "h3", "strong"]):
-        candidate = clean_text(tag.get_text(" ", strip=True))
-        if len(candidate) >= 5:
-            return candidate
-
-    return "제목 없음"
+def get_html(url: str) -> str:
+    response = requests.get(url, headers=HEADERS, timeout=20)
+    response.raise_for_status()
+    response.encoding = response.apparent_encoding
+    return response.text
 
 
-def extract_period(text: str, lines: list[str]) -> str:
-    match = re.search(r"(\d{4}-\d{2}-\d{2}\s*~\s*\d{4}-\d{2}-\d{2})", text)
-    if match:
-        return match.group(1).replace(" ", "")
+def extract_items_from_text(text: str) -> list[dict]:
+    lines = [clean_text(line) for line in text.splitlines() if clean_text(line)]
 
-    match = re.search(r"(\d{4}\.\d{2}\.\d{2}\s*~\s*\d{4}\.\d{2}\.\d{2})", text)
-    if match:
-        return match.group(1).replace(" ", "")
+    items = []
+    i = 0
 
-    for i, line in enumerate(lines):
-        if any(label in line for label in ["접수기간", "기간", "공모기간"]):
-            same_line_match = re.search(
-                r"(\d{4}[-\.]\d{2}[-\.]\d{2}\s*~\s*\d{4}[-\.]\d{2}[-\.]\d{2})",
-                line
-            )
-            if same_line_match:
-                return same_line_match.group(1).replace(" ", "")
+    while i < len(lines):
+        line = lines[i]
 
-            for j in range(i + 1, min(i + 4, len(lines))):
-                next_line = clean_text(lines[j])
-                next_match = re.search(
-                    r"(\d{4}[-\.]\d{2}[-\.]\d{2}\s*~\s*\d{4}[-\.]\d{2}[-\.]\d{2})",
-                    next_line
-                )
-                if next_match:
-                    return next_match.group(1).replace(" ", "")
+        dday_match = re.match(r"^(D-\d+|D-Day|D-\d+\s+접수중|D-\d+\s+접수예정|D-\d+\s+마감임박|D-\d+\s+접수마감|D-\d+\s+접수중)$", line)
+        if line.startswith("D-") or line == "D-Day":
+            dday = line.split()[0]
 
-    return "정보 없음"
+            title = ""
+            host = ""
+            period = ""
+            detail_url = ""
 
+            # 다음 몇 줄 안에서 제목/주최/접수기간 찾기
+            for j in range(i + 1, min(i + 8, len(lines))):
+                cur = lines[j]
 
-def parse_end_date(period: str):
-    match = re.search(r"~\s*(\d{4})[-\.](\d{2})[-\.](\d{2})", period)
-    if not match:
-        return None
+                # 주최
+                if cur.startswith("주최 ."):
+                    host = cur.replace("주최 .", "").strip()
 
-    y, m, d = match.groups()
+                # 접수기간
+                period_match = re.search(r"접수\s+(\d{2}\.\d{2}~\d{2}\.\d{2})", cur)
+                if period_match:
+                    period = period_match.group(1)
 
-    try:
-        return date(int(y), int(m), int(d))
-    except ValueError:
-        return None
+                # 제목 후보: 주최/대상/접수 줄이 아니고 어느 정도 길이가 있는 줄
+                if (
+                    not cur.startswith("주최 .")
+                    and not cur.startswith("대상 .")
+                    and "접수 " not in cur
+                    and not cur.startswith("심사 ")
+                    and not cur.startswith("발표 ")
+                    and len(cur) >= 4
+                    and not cur.startswith("￦")
+                ):
+                    if not title:
+                        title = cur
 
+            if title and period:
+                items.append({
+                    "title": title,
+                    "host": host if host else "정보 없음",
+                    "period": period,
+                    "dday": dday,
+                    "detail_url": detail_url
+                })
 
-def calculate_dday(period: str) -> str:
-    end_dt = parse_end_date(period)
-    if end_dt is None:
-        return "계산불가"
+        i += 1
 
-    today = date.today()
-    diff = (end_dt - today).days
-
-    if diff > 0:
-        return f"D-{diff}"
-    elif diff == 0:
-        return "D-Day"
-    else:
-        return f"마감 {abs(diff)}일 지남"
-
-
-def parse_detail_page(url: str) -> dict | None:
-    try:
-        soup = get_soup(url)
-        full_text = soup.get_text("\n", strip=True)
-        lines = [clean_text(line) for line in full_text.split("\n") if clean_text(line)]
-
-        title = extract_title(soup)
-        period = extract_period(full_text, lines)
-        dday = calculate_dday(period)
-
-        return {
-            "title": title,
-            "period": period,
-            "dday": dday,
-            "detail_url": url
-        }
-
-    except Exception as e:
-        print(f"상세 페이지 파싱 실패: {url} / {e}")
-        return None
-
-
-def remove_duplicates(items: list[dict]) -> list[dict]:
+    # 중복 제거
+    unique = []
     seen = set()
-    result = []
-
     for item in items:
-        key = (item["title"], item["period"], item["detail_url"])
+        key = (item["title"], item["period"], item["dday"])
         if key not in seen:
             seen.add(key)
-            result.append(item)
+            unique.append(item)
 
-    return result
-
-
-def sort_items(items: list[dict]) -> list[dict]:
-    def sort_key(item):
-        end_dt = parse_end_date(item["period"])
-        if end_dt is None:
-            return date.max
-        return end_dt
-
-    return sorted(items, key=sort_key)
+    return unique
 
 
 def save_json(items: list[dict]) -> dict:
     data = {
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "source": "wevity",
+        "source": "contestkorea",
         "count": len(items),
         "items": items
     }
@@ -187,12 +116,16 @@ def save_html(data: dict):
     rows = []
 
     for item in data["items"]:
+        title_html = item["title"]
+        if item["detail_url"]:
+            title_html = f'<a href="{item["detail_url"]}" target="_blank">{item["title"]}</a>'
+
         row = f"""
         <div class="card">
-            <h2><a href="{item['detail_url']}" target="_blank">{item['title']}</a></h2>
+            <h2>{title_html}</h2>
+            <p><strong>주최:</strong> {item['host']}</p>
             <p><strong>접수기간:</strong> {item['period']}</p>
             <p><strong>D-day:</strong> {item['dday']}</p>
-            <p><a href="{item['detail_url']}" target="_blank">상세 보기</a></p>
         </div>
         """
         rows.append(row)
@@ -243,7 +176,7 @@ def save_html(data: dict):
     <div class="info">
         <p>마지막 업데이트: {data["updated_at"]}</p>
         <p>수집 건수: {data["count"]}</p>
-        <p>출처: 위비티</p>
+        <p>출처: ContestKorea</p>
     </div>
     {''.join(rows)}
 </body>
@@ -255,21 +188,17 @@ def save_html(data: dict):
 
 
 def main():
-    print("목록 페이지 수집 중...")
-    detail_links = extract_detail_links()
-    print(f"상세 링크 {len(detail_links)}개 발견")
+    print("ContestKorea 목록 수집 중...")
+    html = get_html(LIST_URL)
 
-    detail_links = detail_links[:20]
+    # HTML 전체 텍스트 기반 파싱
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text("\n", strip=True)
 
-    items = []
-    for idx, link in enumerate(detail_links, start=1):
-        print(f"[{idx}/{len(detail_links)}] 상세 파싱 중: {link}")
-        item = parse_detail_page(link)
-        if item:
-            items.append(item)
+    items = extract_items_from_text(text)
 
-    items = remove_duplicates(items)
-    items = sort_items(items)
+    # 너무 많으면 앞쪽 일부만
+    items = items[:20]
 
     data = save_json(items)
     save_html(data)
