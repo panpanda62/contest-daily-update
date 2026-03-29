@@ -2,6 +2,7 @@ import json
 import os
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import urljoin
 
 import requests
