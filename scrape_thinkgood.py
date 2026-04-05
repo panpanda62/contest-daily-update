@@ -2,6 +2,7 @@ import json
 import os
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import urljoin
 
 import requests
@@ -283,7 +284,7 @@ def build_html(items: list[dict], previous: list[dict]):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     prev_urls = {x.get("url", "") for x in previous}
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
 
     new_count = 0
     cards = []
