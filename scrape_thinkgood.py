@@ -2,7 +2,6 @@ import json
 import os
 import re
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from urllib.parse import urljoin
 
 import requests
@@ -17,6 +16,7 @@ HTML_PATH = os.path.join(OUTPUT_DIR, "index.html")
 DEBUG_HTML_PATH = "debug_list_page.html"
 
 TARGET_COUNT = 10
+MAX_CANDIDATES_TO_TRY = 60
 
 HEADERS = {
     "User-Agent": (
@@ -101,7 +101,7 @@ def extract_links_from_html(html: str) -> list[dict]:
     return results
 
 
-def collect_detail_links() -> list[dict]:
+def collect_initial_links() -> list[dict]:
     html = fetch_html(START_URL)
     print("[목록 HTML 길이]", len(html))
 
@@ -114,50 +114,46 @@ def collect_detail_links() -> list[dict]:
     return results
 
 
-def supplement_links_from_detail_pages(items: list[dict], target_count: int = 10) -> list[dict]:
-    """
-    처음 수집한 링크가 부족하면, 상세 페이지 안의 다른 공모전 링크까지 추가 수집
-    """
-    merged = []
-    seen = set()
+def load_previous() -> list[dict]:
+    if not os.path.exists(JSON_PATH):
+        return []
 
-    for item in items:
-        if item["url"] not in seen:
-            seen.add(item["url"])
-            merged.append(item)
-
-    if len(merged) >= target_count:
-        return merged
-
-    print(f"[보강 시작] 현재 {len(merged)}개 / 목표 {target_count}개")
-
-    base_items = merged[:]
-    for item in base_items:
-        if len(merged) >= target_count:
-            break
-
-        try:
-            html = fetch_html(item["url"])
-            extra_links = extract_links_from_html(html)
-            print(f"[상세 페이지 보강] {item['url']} 에서 {len(extra_links)}개 발견")
-
-            for extra in extra_links:
-                if extra["url"] not in seen:
-                    seen.add(extra["url"])
-                    merged.append(extra)
-                    print(f"  + 추가: {extra['url']}")
-
-                if len(merged) >= target_count:
-                    break
-
-        except Exception as e:
-            print(f"[보강 실패] {item['url']} / {e}")
-
-    print(f"[보강 후 링크 수] {len(merged)}")
-    return merged
+    try:
+        with open(JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
 
 
-def parse_detail_page(item: dict) -> dict:
+def save_json(data: list[dict]):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def is_valid_contest_data(data: dict) -> bool:
+    fields = [
+        data.get("host", ""),
+        data.get("period", ""),
+        data.get("field", ""),
+        data.get("target", ""),
+        data.get("keywords", "")
+    ]
+
+    filled_count = sum(1 for x in fields if x and x != "-")
+
+    # 최소 2개 이상 정보가 있어야 유효로 판단
+    if filled_count < 2:
+        return False
+
+    # 접수기간이 아예 없고 주최도 없으면 거의 실패 페이지
+    if not data.get("host") and not data.get("period"):
+        return False
+
+    return True
+
+
+def parse_detail_page(item: dict) -> dict | None:
     try:
         html = fetch_html(item["url"])
         soup = BeautifulSoup(html, "lxml")
@@ -202,7 +198,7 @@ def parse_detail_page(item: dict) -> dict:
                 description = line
                 break
 
-        return {
+        parsed = {
             "title": item["title"],
             "url": item["url"],
             "host": host,
@@ -213,34 +209,65 @@ def parse_detail_page(item: dict) -> dict:
             "description": description
         }
 
+        if not is_valid_contest_data(parsed):
+            print(f"[무효 데이터 제외] {item['url']}")
+            return None
+
+        return parsed
+
     except Exception as e:
-        return {
-            "title": item["title"],
-            "url": item["url"],
-            "host": "",
-            "period": "",
-            "field": "",
-            "target": "",
-            "keywords": "",
-            "description": f"상세 파싱 실패: {e}"
-        }
+        print(f"[상세 파싱 실패] {item['url']} / {e}")
+        return None
 
 
-def load_previous() -> list[dict]:
-    if not os.path.exists(JSON_PATH):
+def gather_valid_contests(target_count: int = 10) -> list[dict]:
+    initial_links = collect_initial_links()
+
+    if not initial_links:
         return []
 
-    try:
-        with open(JSON_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+    candidate_queue = []
+    seen_candidate_urls = set()
 
+    for item in initial_links:
+        if item["url"] not in seen_candidate_urls:
+            seen_candidate_urls.add(item["url"])
+            candidate_queue.append(item)
 
-def save_json(data: list[dict]):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(JSON_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    valid_results = []
+    seen_valid_urls = set()
+    checked_urls = set()
+
+    idx = 0
+    while idx < len(candidate_queue) and len(valid_results) < target_count and len(checked_urls) < MAX_CANDIDATES_TO_TRY:
+        item = candidate_queue[idx]
+        idx += 1
+
+        if item["url"] in checked_urls:
+            continue
+        checked_urls.add(item["url"])
+
+        parsed = parse_detail_page(item)
+        if parsed:
+            if parsed["url"] not in seen_valid_urls:
+                seen_valid_urls.add(parsed["url"])
+                valid_results.append(parsed)
+                print(f"[유효 공모전 추가] {len(valid_results)}개 / {target_count}개")
+
+        # 현재 페이지에서 추가 후보 링크 수집
+        try:
+            html = fetch_html(item["url"])
+            extra_links = extract_links_from_html(html)
+
+            for extra in extra_links:
+                if extra["url"] not in seen_candidate_urls:
+                    seen_candidate_urls.add(extra["url"])
+                    candidate_queue.append(extra)
+
+        except Exception as e:
+            print(f"[추가 링크 수집 실패] {item['url']} / {e}")
+
+    return valid_results
 
 
 def row_html(label: str, value: str) -> str:
@@ -256,7 +283,7 @@ def build_html(items: list[dict], previous: list[dict]):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     prev_urls = {x.get("url", "") for x in previous}
-    now_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     new_count = 0
     cards = []
@@ -349,39 +376,21 @@ def build_html(items: list[dict], previous: list[dict]):
 
 
 def main():
-    raw_items = collect_detail_links()
+    valid_items = gather_valid_contests(TARGET_COUNT)
 
-    if not raw_items:
-        print("[실패] 상세 링크를 하나도 찾지 못했습니다.")
+    if not valid_items:
+        print("[실패] 유효한 공모전 데이터를 찾지 못했습니다.")
         print(f"[확인 필요] {DEBUG_HTML_PATH} 파일을 열어서 실제 HTML 구조를 확인하세요.")
         return
 
-    raw_items = supplement_links_from_detail_pages(raw_items, TARGET_COUNT)
-
-    unique_items = []
-    seen = set()
-
-    for item in raw_items:
-        if item["url"] in seen:
-            continue
-        seen.add(item["url"])
-        unique_items.append(item)
-
-    # 최소 10개는 확보되도록, 최대는 12개 정도만 사용
-    unique_items = unique_items[:12]
-
-    print("[상세 파싱 시작]")
-    detailed_items = []
-    for item in unique_items:
-        parsed = parse_detail_page(item)
-        print(" -", parsed["url"])
-        detailed_items.append(parsed)
+    # 진짜 유효한 것만 사용, 최대 12개
+    valid_items = valid_items[:12]
 
     previous = load_previous()
-    build_html(detailed_items, previous)
-    save_json(detailed_items)
+    build_html(valid_items, previous)
+    save_json(valid_items)
 
-    print(f"[완료] {len(detailed_items)}개 항목 저장")
+    print(f"[완료] 유효 공모전 {len(valid_items)}개 저장")
     print(f"[생성 파일] {HTML_PATH}")
     print(f"[생성 파일] {JSON_PATH}")
 
